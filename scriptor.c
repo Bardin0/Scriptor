@@ -69,8 +69,20 @@ void editorProcessKeypress() {
 }
 
 /*** Output ***/
+
+void editorDrawRows(){
+    int y;
+    for(int y = 0; y < 24; y++){
+        write(STDOUT_FILENO, "~\r\n", 3);
+    }
+}
+
 void editorRefreshScreen(){
     write(STDIN_FILENO, "\x1b[2J", 4);
+    write(STDIN_FILENO, "\x1b[H", 3);
+
+    editorDrawRows();
+
     write(STDIN_FILENO, "\x1b[H", 3);
 }
 
