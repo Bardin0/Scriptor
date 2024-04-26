@@ -1,11 +1,15 @@
 /*** includes ***/
 
-#include <unistd.h>
-#include <errno.h>
-#include <termios.h>
-#include <stdlib.h>
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <sys/ioctl.h>
+#include <termios.h>
+#include <unistd.h>
+
+
+
 
 /*** defines ***/
 
@@ -14,6 +18,8 @@
 /*** data ***/
 
 struct editorConfig {
+    int screenrows;
+    int screencols;
     struct termios orig_termios;
 };
 
@@ -22,8 +28,8 @@ struct editorConfig E;
 /*** terminal ***/
 
 void die(const char *s){
-    write(STDIN_FILENO, "\x1b[2J", 4);
-    write(STDIN_FILENO, "\x1b[H", 3);
+    write(STDOUT_FILENO, "\x1b[2J", 4);
+    write(STDOUT_FILENO, "\x1b[H", 3);
 
     perror(s);
     exit(1);
@@ -59,14 +65,29 @@ char editorReadKey() {
     return c;
 }
 
+int getWindowSize (int *rows, int *cols){
+    struct winsize ws;
+
+    if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0){
+        return -1;
+    } 
+    else
+    {
+        *rows = ws.ws_row;
+        *cols = ws.ws_col;
+        return 0;
+    }
+}
+
 /*** input ***/
+
 void editorProcessKeypress() {
     char c = editorReadKey();
 
     switch (c) {
     case CTRL_KEY('q'):
-        write(STDIN_FILENO, "\x1b[2J", 4);
-        write(STDIN_FILENO, "\x1b[H", 3);
+        write(STDOUT_FILENO, "\x1b[2J", 4);
+        write(STDOUT_FILENO, "\x1b[H", 3);
         exit(0);
         break;
     }
@@ -82,18 +103,23 @@ void editorDrawRows(){
 }
 
 void editorRefreshScreen(){
-    write(STDIN_FILENO, "\x1b[2J", 4);
-    write(STDIN_FILENO, "\x1b[H", 3);
+    write(STDOUT_FILENO, "\x1b[2J", 4);
+    write(STDOUT_FILENO, "\x1b[H", 3);
 
     editorDrawRows();
 
-    write(STDIN_FILENO, "\x1b[H", 3);
+    write(STDOUT_FILENO, "\x1b[H", 3);
 }
 
 /*** init ***/
 
+void initEditor(){
+    if(getWindowSize(&E.screenrows, &E.screencols) == -1) die ("getWindowSize");
+}
+
 int main(){
     enableRawMode();
+    initEditor();
 
     while (1){
         editorRefreshScreen();
