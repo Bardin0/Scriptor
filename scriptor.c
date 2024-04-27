@@ -1,9 +1,5 @@
 /*** includes ***/
 
-#define _DEFAULT_SOURCE
-#define _BSD_SOURCE
-#define _GNU_SOURCE
-
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -16,6 +12,9 @@
 
 /*** defines ***/
 
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define SCRIPTOR_VERSION "0.0.1"
 
@@ -41,6 +40,7 @@ typedef struct erow{
 struct editorConfig {
     int cx, cy;
     int rowoff;
+    int coloff;
     int screenrows;
     int screencols;
     int numrows;
@@ -53,50 +53,53 @@ struct editorConfig E;
 /*** terminal ***/
 
 void die(const char *s){
-    write(STDOUT_FILENO, "\x1b[2J", 4);
+    write(STDOUT_FILENO, "\x1b[2J", 4); //Clears screen before printing error
     write(STDOUT_FILENO, "\x1b[H", 3);
 
-    perror(s);
+    perror(s);  
     exit(1);
 }
 
 void disableRawMode(){
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1) 
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1) //Resets terminal to default configeration, prompts error if failed
         die("tcsetattr");
 }
 
 void enableRawMode(){
-    if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1) die("tcgetattr");
-    atexit(disableRawMode);
+    if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1) die("tcgetattr");   //Stores original termial information in E.orig_termios
+    atexit(disableRawMode); //Calls disableRawMode when program exits
+
+    //Sets raw mode for terminal
 
     struct termios raw = E.orig_termios;
     raw.c_iflag &= ~(ICRNL | IXON | INPCK | ISTRIP | BRKINT);
-    raw.c_oflag &= ~(OPOST);
-    raw.c_cflag |= (CS8);
-    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-    raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 1;
+    raw.c_oflag &= ~(OPOST); //Disables post processing
+    raw.c_cflag |= (CS8); //Sets character size to 8 bits
+    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG); //Disables special characters
+    raw.c_cc[VMIN] = 0; //Sets minimum number of bytes to read
+    raw.c_cc[VTIME] = 1; 
 
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr"); //Sets new attributes to the terminal
 }
 
 int editorReadKey() {
     int nread;
     char c;
 
-    while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+    while ((nread = read(STDIN_FILENO, &c, 1)) != 1) { //Reads one byte from STDIN_FILENO and stores it in c
         if (nread == -1 && errno != EAGAIN) die("read");
     }
 
-    if (c == '\x1b'){
+    if (c == '\x1b'){ //If c is an escape character
         char seq[3];
 
-        if(read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
-        if(read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+        if(read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b'; 
+        if(read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b'; 
 
-        if(seq[0] == '['){
-            if (seq[1] >= '0' && seq[1] <= '9'){
-                if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+        //Checks if special characters were input and returns the appropriate key
+        if(seq[0] == '['){ 
+            if (seq[1] >= '0' && seq[1] <= '9'){ 
+                if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b'; 
                 if (seq[2] == '~'){
                     switch(seq[1]){
                         case '1': return HOME_KEY;
@@ -107,8 +110,8 @@ int editorReadKey() {
                         case '7': return HOME_KEY;
                         case '8': return END_KEY;
                     }
-                }
-            }else {
+                }   
+            }else { //If no digit follows the escape key then it is an arrow key and returns correct one
                 switch (seq[1]){
                     case 'A': return ARROW_UP;
                     case 'B': return ARROW_DOWN;
@@ -118,6 +121,7 @@ int editorReadKey() {
                     case 'F': return END_KEY;
                 }
             }
+            //If the first character is 'O' then it is an arrow key that maps to the home or end key
         }else if (seq[0] == 'O'){
             switch (seq[1]){
                 case 'H': return HOME_KEY;
@@ -132,10 +136,11 @@ int editorReadKey() {
 }
 
 int getCursorPosition(int *rows, int *cols){
+    //Back up method to find terminal size
     char buf[32];
     unsigned int i = 0;
 
-    if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
+    if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1; //Gets cursor position
 
     while (i < sizeof(buf) - 1){
         if(read(STDIN_FILENO, &buf[i], 1) != 1) break;
@@ -153,7 +158,7 @@ int getCursorPosition(int *rows, int *cols){
 int getWindowSize (int *rows, int *cols){
     struct winsize ws;
 
-    if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0){
+    if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0){  //Gets window size of terminal
         if(write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
         return getCursorPosition(rows, cols);
     } 
@@ -228,9 +233,7 @@ void editorMoveCursor(int key){
             }
             break;
         case ARROW_RIGHT:
-            if (E.cx != E.screencols -1){
-                E.cx++;
-            }
+            E.cx++;
             break;
         case ARROW_UP:
             if (E.cy != 0){
@@ -291,6 +294,12 @@ void editorScroll() {
     if (E.cy >= E.rowoff + E.screenrows) {
         E.rowoff = E.cy - E.screenrows + 1;
     }
+    if (E.cx < E.coloff){
+        E.coloff = E.cx;
+    }
+    if (E.cx >= E.coloff + E.screencols){
+        E.coloff = E.cx - E.screencols + 1;
+    }
 }
 
 void editorDrawRows(struct abuf *ab){
@@ -298,24 +307,25 @@ void editorDrawRows(struct abuf *ab){
     for(int y = 0; y < E.screenrows; y++){
         int filerow = y + E.rowoff;
         if(filerow >= E.numrows){
-        if (E.numrows && y == E.screenrows/3){
-            char welcome[80];
-            int welcomelen = snprintf(welcome, sizeof(welcome), "Scriptor editor -- version %s", SCRIPTOR_VERSION);
-            if(welcomelen > E.screencols) welcomelen = E.screencols;
-            int padding = (E.screencols - welcomelen)/2;
-            if(padding){
+            if (E.numrows && y == E.screenrows/3){
+                char welcome[80];
+                int welcomelen = snprintf(welcome, sizeof(welcome), "Scriptor editor -- version %s", SCRIPTOR_VERSION); //Prints welcome message 1/3 down the page
+                if(welcomelen > E.screencols) welcomelen = E.screencols;
+                int padding = (E.screencols - welcomelen)/2;
+                if(padding){
+                    abAppend(ab, "~", 1);
+                    padding--;
+                }
+                while (padding--) abAppend(ab, " ", 1);
+                abAppend(ab, welcome, welcomelen);
+            } else {
                 abAppend(ab, "~", 1);
-                padding--;
             }
-            while (padding--) abAppend(ab, " ", 1);
-            abAppend(ab, welcome, welcomelen);
-        } else {
-            abAppend(ab, "~", 1);
-        }
         }else{
-            int len = E.row[filerow].size;
+            int len = E.row[filerow].size - E.coloff;
+            if(len < 0 ) len = 0;
             if (len > E.screencols) len = E.screencols;
-            abAppend(ab, E.row[filerow].chars, len);
+            abAppend(ab, &E.row[filerow].chars[E.coloff], len);
         }
 
         abAppend(ab, "\x1b[K", 3);
@@ -336,7 +346,7 @@ void editorRefreshScreen(){
     editorDrawRows(&ab);
 
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, E.cx + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1,(E.cx - E.coloff) + 1);
     abAppend(&ab, buf, strlen(buf));
 
     abAppend(&ab, "\x1b[?25h", 6);
@@ -351,10 +361,11 @@ void initEditor(){
     E.cx = 0;
     E.cy = 0;
     E.rowoff = 0;
+    E.coloff = 0;
     E.numrows = 0;
     E.row = NULL;
 
-    if(getWindowSize(&E.screenrows, &E.screencols) == -1) die ("getWindowSize");
+    if(getWindowSize(&E.screenrows, &E.screencols) == -1) die ("getWindowSize");    //Gets window size
 }
 
 int main(int argc, char *argv[]){
