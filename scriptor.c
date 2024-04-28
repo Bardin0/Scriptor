@@ -38,12 +38,12 @@ typedef struct erow{
 } erow;
 
 struct editorConfig {
-    int cx, cy;
-    int rowoff;
-    int coloff;
-    int screenrows;
-    int screencols;
-    int numrows;
+    int cx, cy; // Cursor x and y position relative to file
+    int rowoff; //Row offset
+    int coloff; //Column offset
+    int screenrows; //Stores number of rows in terminal
+    int screencols; //Stores number of columns in terminal
+    int numrows;    //Stores number of rows in file
     erow *row;
     struct termios orig_termios;
 };
@@ -226,25 +226,35 @@ void abFree(struct abuf *ab){
 /*** input ***/
 
 void editorMoveCursor(int key){
+    erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];  //Checks if cursor is on an actual line
+
     switch(key){
         case ARROW_LEFT:
-            if (E.cx !=0){
+            if (E.cx !=0){  //Checks if the cursor is at the left edge of screen
                 E.cx--;
             }
             break;
         case ARROW_RIGHT:
-            E.cx++;
+            if (row && E.cx < row->size){   //Checks if cursor is to the left of the end of the line
+                E.cx++;
+            }
             break;
-        case ARROW_UP:
-            if (E.cy != 0){
+        case ARROW_UP:  
+            if (E.cy != 0){ //Checks if cursor is at the top of the file
                 E.cy--;
             }
             break;
         case ARROW_DOWN:
-            if (E.cy < E.numrows){
+            if (E.cy < E.numrows){  //Checks if cursor is at the bottom of the file
                 E.cy++;
             }
             break;
+    }
+
+    row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy]; // Checks if cursor is on an actual line
+    int rowlen = row ? row->size: 0; //Checks if row has is null, if not assigns the length of the row to rowlen
+    if (E.cx > rowlen){ //checks if cursor x position is > than the length of the row
+        E.cx = rowlen;
     }
 }
 
@@ -358,10 +368,10 @@ void editorRefreshScreen(){
 /*** init ***/
 
 void initEditor(){
-    E.cx = 0;
-    E.cy = 0;
-    E.rowoff = 0;
-    E.coloff = 0;
+    E.cx = 0; //Cursor x position within file
+    E.cy = 0; //Cursor y position within file
+    E.rowoff = 0; //Keeps track of what row user is scrolled to 
+    E.coloff = 0;//Keeps track of what column user is scrolled to
     E.numrows = 0;
     E.row = NULL;
 
