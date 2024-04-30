@@ -21,6 +21,8 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define SCRIPTOR_VERSION "0.0.1"
 #define SCRIPTOR_TAB_STOP 8
+#define SCRIPTOR_QUIT_TIMES 3
+#define ABUF_INIT {NULL, 0};
 
 enum editorKey {
     BACKSPACE = 127,
@@ -53,10 +55,16 @@ struct editorConfig {
     int screencols; //Stores number of columns in terminal
     int numrows;    //Stores number of rows in file
     erow *row;
+    int dirty;
     char *filename;
     char statusmsg[80];
     time_t statusmsg_time;
     struct termios orig_termios;
+};
+
+struct abuf{
+    char *b;
+    int len;
 };
 
 struct editorConfig E;
@@ -74,12 +82,12 @@ void die(const char *s){
     exit(1);
 }
 
-void disableRawMode(){
+void disableRawMode(void){
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1) //Resets terminal to default configeration, prompts error if failed
         die("tcsetattr");
 }
 
-void enableRawMode(){
+void enableRawMode(void){
     if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1) die("tcgetattr");   //Stores original termial information in E.orig_termios
     atexit(disableRawMode); //Calls disableRawMode when program exits
 
@@ -96,7 +104,7 @@ void enableRawMode(){
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr"); //Sets new attributes to the terminal
 }
 
-int editorReadKey() {
+int editorReadKey(void) {
     int nread;
     char c;
     while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
@@ -220,11 +228,25 @@ void editorAppendRow(char *s, size_t len) {
     E.row[at].chars = malloc(len + 1);
     memcpy(E.row[at].chars, s, len);
     E.row[at].chars[len] = '\0';
-    E.numrows++;
 
     E.row[at].rsize = 0;
     E.row[at].render = NULL;
     editorUpdateRow(&E.row[at]);
+    E.numrows++;
+    E.dirty++;
+}
+
+void editorFreeRow(erow *row) {
+    free(row->render);
+    free(row->chars);
+}
+
+void editorDelRow(int at) {
+    if (at < 0 || at >= E.numrows) return;
+    editorFreeRow(&E.row[at]);
+    memmove(&E.row[at], &E.row[at + 1], sizeof(erow) * (E.numrows - at - 1));
+    E.numrows--;
+    E.dirty++;
 }
 
 void editorRowInsertChar(erow *row, int at, int c) {
@@ -234,6 +256,25 @@ void editorRowInsertChar(erow *row, int at, int c) {
     row->size++;
     row->chars[at] = c;
     editorUpdateRow(row);
+
+    E.dirty++;
+}
+
+void editorRowAppendString(erow *row, char *s, size_t len) {
+    row->chars = realloc(row->chars, row->size + len + 1);
+    memcpy(&row->chars[row->size], s, len);
+    row->size += len;
+    row->chars[row->size] = '\0';
+    editorUpdateRow(row);
+    E.dirty++;
+}
+
+void editorRowDelChar(erow *row, int at) {
+    if (at < 0 || at >= row->size) return;
+    memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
+    row->size--;
+    editorUpdateRow(row);
+    E.dirty++;
 }
 
 /*** editor operations***/
@@ -244,6 +285,22 @@ void editorInsertChar(int c) {
     }
     editorRowInsertChar(&E.row[E.cy], E.cx, c);
     E.cx++;
+}
+
+void editorDelChar(void) {
+    if (E.cy == E.numrows) return;  //If cursor is at the end of file
+    if (E.cx == 0 && E.cy == 0) return; //If cursor is at beginning of first line
+
+    erow *row = &E.row[E.cy];
+    if (E.cx > 0) {
+        editorRowDelChar(row, E.cx - 1);
+        E.cx--;
+    }else {
+        E.cx = E.row[E.cy - 1].size;
+        editorRowAppendString(&E.row[E.cy - 1], row->chars, row->size);
+        editorDelRow(E.cy);
+        E.cy--;
+    }
 }
 
 /*** file i/o ***/
@@ -283,9 +340,10 @@ void editorOpen(char *filename){
     }
     free(line);
     fclose(fp);
+    E.dirty = 0;
 }
 
-void editorSave() {
+void editorSave(void) {
     if (E.filename == NULL) return;
 
     int len;
@@ -296,6 +354,7 @@ void editorSave() {
             if (write(fd, buf, len) == len){
                 close(fd);
                 free(buf);
+                E.dirty = 0;
                 editorSetStatusMessage("%d bytes written to disk", len);
                 return;
             }
@@ -307,13 +366,6 @@ void editorSave() {
 }
 
 /*** append buffer***/
-
-struct abuf{
-    char *b;
-    int len;
-};
-
-#define ABUF_INIT {NULL, 0};
 
 void abAppend(struct abuf *ab, const char *s, int len){
     char *new = realloc (ab->b, ab->len + len);
@@ -369,7 +421,9 @@ void editorMoveCursor(int key){
     }
 }
 
-void editorProcessKeypress() {
+void editorProcessKeypress(void) {
+    static int quit_times = SCRIPTOR_QUIT_TIMES;
+
     int c = editorReadKey();
 
     switch (c) {
@@ -378,6 +432,12 @@ void editorProcessKeypress() {
         break;
 
     case CTRL_KEY('q'):
+        if (E.dirty && quit_times > 0) {
+            editorSetStatusMessage("WARNING!!! File has unsaved changes. "
+            "Press Ctrl-Q %d more times to quit.", quit_times);
+            quit_times--;
+            return;
+        }
         write(STDOUT_FILENO, "\x1b[2J", 4);
         write(STDOUT_FILENO, "\x1b[H", 3);
         exit(0);
@@ -399,6 +459,8 @@ void editorProcessKeypress() {
     case BACKSPACE:
     case CTRL_KEY('h'):
     case DEL_KEY:
+        if (c == DEL_KEY) editorMoveCursor(ARROW_RIGHT);
+        editorDelChar();
         break;
 
     case PAGE_UP:
@@ -432,11 +494,12 @@ void editorProcessKeypress() {
         editorInsertChar(c);
         break;
     }
+    quit_times = SCRIPTOR_QUIT_TIMES;
 }
 
 /*** Output ***/
 
-void editorScroll() {
+void editorScroll(void) {
     E.rx = 0;
     if (E.cy < E.numrows) {
         E.rx = editorRowCxToRx(&E.row[E.cy], E.cx);
@@ -491,7 +554,7 @@ void editorDrawStatusBar(struct abuf *ab) {
     abAppend(ab, "\x1b[7m", 4);
     char status[80], rstatus[80];
 
-    int len = snprintf(status, sizeof(status), "%.20s - %d lines",E.filename ? E.filename : "[No Name]", E.numrows);
+    int len = snprintf(status, sizeof(status), "%.20s - %d lines %s", E.filename ? E.filename : "[No Name]", E.numrows,E.dirty ? "(modified)" : "");
     int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d",E.cy + 1, E.numrows);
 
     if (len > E.screencols) len = E.screencols;
@@ -517,7 +580,7 @@ void editorDrawMessageBar(struct abuf *ab) {
         abAppend(ab, E.statusmsg, msglen);
 }
 
-void editorRefreshScreen(){
+void editorRefreshScreen(void){
     editorScroll();
 
     struct abuf ab = ABUF_INIT;
@@ -549,7 +612,7 @@ void editorSetStatusMessage(const char *fmt, ...) {
 
 /*** init ***/
 
-void initEditor(){
+void initEditor(void){
     E.cx = 0; //Cursor x position within file
     E.cy = 0; //Cursor y position within file
     E.rowoff = 0; //Keeps track of what row user is scrolled to 
@@ -557,6 +620,7 @@ void initEditor(){
     E.rx = 0;
     E.numrows = 0;
     E.row = NULL;
+    E.dirty = 0;
     E.filename = NULL;
     E.statusmsg[0] = '\0';
     E.statusmsg_time = 0;
