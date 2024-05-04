@@ -23,6 +23,8 @@
 #define SCRIPTOR_TAB_STOP 8
 #define SCRIPTOR_QUIT_TIMES 3
 #define ABUF_INIT {NULL, 0};
+#define HL_HIGHLIGHT_NUMBERS (1<<0)
+#define HLDB_ENTRIES (sizeof(HLDB) / sizeof(HLDB[0]))
 
 enum editorKey {
     BACKSPACE = 127,
@@ -45,6 +47,12 @@ enum editorHighlight {
 
 /*** data ***/
 
+struct editorSyntax {
+  char *filetype;   //Name of the filetype to be displayed in status bar
+  char **filematch; //Array of strings to compare against the filetype
+  int flags;    //Contains a bitfield to track what to be highlighted based on filetype
+};
+
 typedef struct erow{
     int size;
     int rsize;
@@ -54,27 +62,40 @@ typedef struct erow{
 } erow;
 
 struct editorConfig {
-    int cx, cy; // Cursor x and y position relative to file
-    int rx; //Horizontal index in the render field
-    int rowoff; //Row offset
-    int coloff; //Column offset
-    int screenrows; //Stores number of rows in terminal
-    int screencols; //Stores number of columns in terminal
-    int numrows;    //Stores number of rows in file
-    erow *row;
-    int dirty;
-    char *filename;
-    char statusmsg[80];
-    time_t statusmsg_time;
-    struct termios orig_termios;
+    int cx, cy;                     // Cursor x and y position relative to file
+    int rx;                         //Horizontal index in the render field
+    int rowoff;                     //Row offset
+    int coloff;                     //Column offset
+    int screenrows;                 //Stores number of rows in terminal
+    int screencols;                 //Stores number of columns in terminal
+    int numrows;                    //Stores number of rows in file
+    erow *row;                      //Array of rows
+    int dirty;                      //Flag to track if file has been modified
+    char *filename;                 //Stores the filename of the file being edited
+    char statusmsg[80];             //Stores the status message
+    struct editorSyntax *syntax;    //Stores the filetype and syntax to be used  
+    time_t statusmsg_time;          //Stores how long status message is to be displayed
+    struct termios orig_termios;    //Stores the original terminal settings
 };
 
 struct abuf{
-    char *b;
-    int len;
+    char *b;    //Pointer to a buffer
+    int len;    //Length of the buffer
 };
 
 struct editorConfig E;
+
+/*** filetypes ***/
+
+char *C_HL_extensions[] = { ".c", ".h", ".cpp", NULL }; //C/C++ file extensions
+
+struct editorSyntax HLDB[] = {
+  {
+    "c",
+    C_HL_extensions,
+    HL_HIGHLIGHT_NUMBERS
+  },
+};
 
 /*** prototypes ***/
 void editorSetStatusMessage(const char *fmt, ...);
@@ -103,29 +124,36 @@ void enableRawMode(void){
     //Sets raw mode for terminal
 
     struct termios raw = E.orig_termios;
-    raw.c_iflag &= ~(ICRNL | IXON | INPCK | ISTRIP | BRKINT);
-    raw.c_oflag &= ~(OPOST); //Disables post processing
-    raw.c_cflag |= (CS8); //Sets character size to 8 bits
-    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG); //Disables special characters
-    raw.c_cc[VMIN] = 0; //Sets minimum number of bytes to read
-    raw.c_cc[VTIME] = 1; 
+    raw.c_iflag &= ~(ICRNL | IXON | INPCK | ISTRIP | BRKINT);   //Alters input mode flags
+    raw.c_oflag &= ~(OPOST);                                    //Disables output processing
+    raw.c_cflag |= (CS8);                                       //Sets character size to 8 bits
+    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);            //disables echoing, canonical mode, special characters and SIGINT signals
+    raw.c_cc[VMIN] = 0;                                         //Allows read to return without reading a byte
+    raw.c_cc[VTIME] = 1;                                        //The read call will return every 0.1 seconds
 
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr"); //Sets new attributes to the terminal
 }
 
 int editorReadKey(void) {
+
     int nread;
     char c;
-    while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+
+    while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {  //Reads a character form input
         if (nread == -1 && errno != EAGAIN) die("read");
     }
     if (c == '\x1b') {
         char seq[3];
-        if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+
+        //Attemps to read 2 next characters when escape key is read
+        if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';  //If read fails, return escape key
         if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+
+        //Checks for escape sequences with [ following the escape key
         if (seq[0] == '[') {
             if (seq[1] >= '0' && seq[1] <= '9') {
-                if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+                if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b'; //Reads the next character
+                //returns keys based on their escape sequence
                 if (seq[2] == '~') {
                     switch (seq[1]) {
                         case '1': return HOME_KEY;
@@ -153,9 +181,9 @@ int editorReadKey(void) {
                 case 'F': return END_KEY;
             }
         }
-        return '\x1b';
+        return '\x1b';  //returns escape character if nothing else is returned
     } else {
-    return c;
+    return c;   //returns input if its not an escape character
     }
 }
 
@@ -165,16 +193,16 @@ int getCursorPosition(int *rows, int *cols){
     unsigned int i = 0;
 
     if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1; //Gets cursor position
-
-    while (i < sizeof(buf) - 1){
-        if(read(STDIN_FILENO, &buf[i], 1) != 1) break;
-        if (buf[i] == 'R') break;
+                                                            // '\x1b[6n' returns cursor position in form '\x1b[Row;ColumnR'
+    while (i < sizeof(buf) - 1){                            
+        if(read(STDIN_FILENO, &buf[i], 1) != 1) break;      //Reads characters into buf
+        if (buf[i] == 'R') break;                           //Breaks as this is the end of the cursor position
         i++;
     }
-    buf[i] = '\0';
+    buf[i] = '\0';  //Sets last charcter in buf to the NULL charcter to ensure it is a valid string
 
-    if (buf[0] != '\x1b' || buf[1] != '[') return -1;
-    if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
+    if (buf[0] != '\x1b' || buf[1] != '[') return -1;           //Checks if it is a valid cursor position
+    if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;   //
 
     return 0;
 }
@@ -777,7 +805,7 @@ void editorDrawStatusBar(struct abuf *ab) {
     char status[80], rstatus[80];
 
     int len = snprintf(status, sizeof(status), "%.20s - %d lines %s", E.filename ? E.filename : "[No Name]", E.numrows,E.dirty ? "(modified)" : "");
-    int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d",E.cy + 1, E.numrows);
+    int rlen = snprintf(rstatus, sizeof(rstatus), "%s | %d/%d",E.syntax ? E.syntax->filetype : "no ft", E.cy + 1, E.numrows);
 
     if (len > E.screencols) len = E.screencols;
     abAppend(ab, status, len);
@@ -835,10 +863,10 @@ void editorSetStatusMessage(const char *fmt, ...) {
 /*** init ***/
 
 void initEditor(void){
-    E.cx = 0; //Cursor x position within file
-    E.cy = 0; //Cursor y position within file
-    E.rowoff = 0; //Keeps track of what row user is scrolled to 
-    E.coloff = 0;//Keeps track of what column user is scrolled to
+    E.cx = 0; 
+    E.cy = 0;
+    E.rowoff = 0;
+    E.coloff = 0;
     E.rx = 0;
     E.numrows = 0;
     E.row = NULL;
@@ -846,6 +874,7 @@ void initEditor(void){
     E.filename = NULL;
     E.statusmsg[0] = '\0';
     E.statusmsg_time = 0;
+    E.syntax = NULL;
 
     if(getWindowSize(&E.screenrows, &E.screencols) == -1) die ("getWindowSize");    //Gets window size
     E.screenrows -= 2;
